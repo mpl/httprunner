@@ -105,12 +105,12 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 	args := strings.Fields(*flagCommand)
 	cmd := exec.Command(args[0], args[1:]...)
 	var buf, berr bytes.Buffer
-	//	out := io.MultiWriter(os.Stdout, &buf)
 	lw := limitWriter{
 		limit: 1 << 20,
 		buf:   &buf,
 	}
-	cmd.Stdout = lw
+	stdout := io.MultiWriter(os.Stdout, lw)
+	cmd.Stdout = stdout
 	cmd.Stderr = &berr
 	if err := cmd.Start(); err != nil {
 		log.Printf("%v failed to start: %v, %v", args[0], err, berr.String())
@@ -122,21 +122,39 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	var bufout bytes.Buffer
-	// TODO(mpl): make that time configurable?
-	t := time.After(5 * time.Second)
+	t := time.After(1 * time.Second)
+	var seenData bool
 	for {
 		select {
 		case <-t:
-			w.Write(bufout.Bytes())
+			var response io.Reader
+			if bufout.Len() > 0 {
+				response = &bufout
+			} else {
+				response = strings.NewReader("Command started but no output yet.")
+			}
+			if _, err := io.Copy(w, response); err != nil {
+				log.Printf("response copy error: %v", err)
+			}
 			return
 		default:
 		}
-		_, err := io.Copy(&bufout, lw)
+		n, err := io.Copy(&bufout, lw)
 		if err != nil {
+			log.Printf("output copy error: %v", err)
 			break
 		}
+		// TODO(mpl): maybe break if we don't see any output for more than, say 100ms?
+		if n > 0 && !seenData {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			seenData = true
+		}
 	}
-	w.Write(bufout.Bytes())
+	// TODO(mpl): not sure we can ever get here?
+	if _, err := io.Copy(w, &bufout); err != nil {
+		log.Print(err)
+	}
 }
 
 func main() {
