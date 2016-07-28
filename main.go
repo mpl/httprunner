@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mpl/basicauth"
@@ -77,26 +78,43 @@ func initUserPass() {
 // TODO(mpl): have a look at https://github.com/cespare/window
 
 type limitWriter struct {
-	deadline   time.Time
-	limit      int
-	sum        int
-	buf        *bytes.Buffer
-	discarding bool
+	deadline     time.Time
+	limit        int
+	sum          int
+	bufMu        sync.Mutex
+	buf          *bytes.Buffer
+	discardingMu sync.RWMutex
+	discarding   bool
 }
 
 func (lw limitWriter) Write(p []byte) (n int, err error) {
+	lw.discardingMu.RLock()
 	if lw.discarding {
+		lw.discardingMu.RUnlock()
 		return ioutil.Discard.Write(p)
 	}
+	lw.discardingMu.RUnlock()
+	lw.bufMu.Lock()
 	n, err = lw.buf.Write(p)
+	lw.bufMu.Unlock()
 	lw.sum += n
 	if lw.sum > lw.limit {
+		lw.discardingMu.Lock()
 		lw.discarding = true
+		lw.discardingMu.Unlock()
 	}
 	return
 }
 
 func (lw limitWriter) Read(p []byte) (n int, err error) {
+	lw.discardingMu.RLock()
+	if lw.discarding {
+		lw.discardingMu.RUnlock()
+		return 0, io.EOF
+	}
+	lw.discardingMu.RUnlock()
+	lw.bufMu.Lock()
+	defer lw.bufMu.Unlock()
 	return lw.buf.Read(p)
 }
 
