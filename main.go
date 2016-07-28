@@ -129,6 +129,7 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 		} else {
 			response = strings.NewReader("Command started but no output yet.")
 		}
+		// TODO(mpl): there's some sort of race in the output?
 		if _, err := io.Copy(w, response); err != nil {
 			log.Printf("response copy error: %v", err)
 		}
@@ -184,6 +185,7 @@ func main() {
 
 	initUserPass()
 
+	// TODO(mpl): handler to make it die
 	http.Handle("/run", makeHandler(handleCommand))
 	if err := http.ListenAndServeTLS(
 		*flagHost,
