@@ -122,20 +122,26 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	var bufout bytes.Buffer
-	t := time.After(1 * time.Second)
+	sendResponse := func(b *bytes.Buffer) {
+		var response io.Reader
+		if b.Len() > 0 {
+			response = b
+		} else {
+			response = strings.NewReader("Command started but no output yet.")
+		}
+		if _, err := io.Copy(w, response); err != nil {
+			log.Printf("response copy error: %v", err)
+		}
+	}
 	var seenData bool
+	// TODO(mpl): test if we could relax both these times now that we're sending the header asap.
+	maxIdle := 200 * time.Millisecond
+	t := time.After(1 * time.Second)
+	lastDataTime := time.Now()
 	for {
 		select {
 		case <-t:
-			var response io.Reader
-			if bufout.Len() > 0 {
-				response = &bufout
-			} else {
-				response = strings.NewReader("Command started but no output yet.")
-			}
-			if _, err := io.Copy(w, response); err != nil {
-				log.Printf("response copy error: %v", err)
-			}
+			sendResponse(&bufout)
 			return
 		default:
 		}
@@ -144,17 +150,21 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 			log.Printf("output copy error: %v", err)
 			break
 		}
-		// TODO(mpl): maybe break if we don't see any output for more than, say 100ms?
-		if n > 0 && !seenData {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			seenData = true
+		if n > 0 {
+			if !seenData {
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+				seenData = true
+			}
+			lastDataTime = time.Now()
+		} else {
+			if lastDataTime.Add(maxIdle).Before(time.Now()) {
+				log.Printf("no output for more than %v, wrapping up.", maxIdle)
+				break
+			}
 		}
 	}
-	// TODO(mpl): not sure we can ever get here?
-	if _, err := io.Copy(w, &bufout); err != nil {
-		log.Print(err)
-	}
+	sendResponse(&bufout)
 }
 
 func main() {
