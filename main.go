@@ -32,11 +32,15 @@ var (
 var (
 	rootdir, _ = os.Getwd()
 	up         *basicauth.UserPass
+
+	childrenMu sync.Mutex
+	children   []*os.Process
 )
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "\t httprunner \n")
 	flag.PrintDefaults()
+	fmt.Fprint(os.Stderr, "The endpoints are /run, /kill, and /die.\n")
 	os.Exit(2)
 }
 
@@ -78,11 +82,13 @@ func initUserPass() {
 // TODO(mpl): have a look at https://github.com/cespare/window
 
 type limitWriter struct {
-	deadline     time.Time
-	limit        int
-	sum          int
-	bufMu        sync.Mutex
-	buf          *bytes.Buffer
+	deadline time.Time
+	limit    int
+	sum      int
+
+	bufMu sync.Mutex
+	buf   *bytes.Buffer
+
 	discardingMu sync.RWMutex
 	discarding   bool
 }
@@ -118,6 +124,35 @@ func (lw limitWriter) Read(p []byte) (n int, err error) {
 	return lw.buf.Read(p)
 }
 
+func killChildren() {
+	childrenMu.Lock()
+	defer childrenMu.Unlock()
+	for _, v := range children {
+		if err := v.Kill(); err != nil {
+			log.Printf("couldn't kill child: %v", err)
+		}
+	}
+}
+
+func handleKillAll(w http.ResponseWriter, r *http.Request) {
+	killChildren()
+	if _, err := io.Copy(w, strings.NewReader("They have left for a better world.")); err != nil {
+		log.Print(err)
+	}
+}
+
+func handleDie(w http.ResponseWriter, r *http.Request) {
+	killChildren()
+	sayonara := "The sweet embrace of death, finally."
+	if _, err := io.Copy(w, strings.NewReader(sayonara)); err != nil {
+		log.Print(err)
+	}
+	log.Print(sayonara)
+	time.Sleep(time.Second)
+	os.Exit(0)
+}
+
+// TODO(mpl): do some request suppressing
 func handleCommand(w http.ResponseWriter, r *http.Request) {
 	// TODO(mpl): be less lazy about the doubled spaces, and probably other things.
 	args := strings.Fields(*flagCommand)
@@ -134,6 +169,9 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%v failed to start: %v, %v", args[0], err, berr.String())
 		return
 	}
+	childrenMu.Lock()
+	children = append(children, cmd.Process)
+	childrenMu.Unlock()
 	go func() {
 		if err := cmd.Wait(); err != nil {
 			log.Printf("%v failed: %v, %v", args[0], err, berr.String())
@@ -147,7 +185,6 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 		} else {
 			response = strings.NewReader("Command started but no output yet.")
 		}
-		// TODO(mpl): there's some sort of race in the output?
 		if _, err := io.Copy(w, response); err != nil {
 			log.Printf("response copy error: %v", err)
 		}
@@ -205,6 +242,8 @@ func main() {
 
 	// TODO(mpl): handler to make it die
 	http.Handle("/run", makeHandler(handleCommand))
+	http.Handle("/kill", makeHandler(handleKillAll))
+	http.Handle("/die", makeHandler(handleDie))
 	if err := http.ListenAndServeTLS(
 		*flagHost,
 		filepath.Join(os.Getenv("HOME"), "keys", "cert.pem"),
