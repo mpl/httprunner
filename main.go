@@ -152,6 +152,8 @@ func handleDie(w http.ResponseWriter, r *http.Request) {
 	os.Exit(0)
 }
 
+// TODO(mpl): handler to list all [pid, time started]
+
 // TODO(mpl): do some request suppressing
 func handleCommand(w http.ResponseWriter, r *http.Request) {
 	// TODO(mpl): be less lazy about the doubled spaces, and probably other things.
@@ -169,6 +171,7 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%v failed to start: %v, %v", args[0], err, berr.String())
 		return
 	}
+	log.Printf("Started %v with pid %v", args[0], cmd.Process.Pid)
 	childrenMu.Lock()
 	children = append(children, cmd.Process)
 	childrenMu.Unlock()
@@ -240,7 +243,6 @@ func main() {
 
 	initUserPass()
 
-	// TODO(mpl): handler to make it die
 	http.Handle("/run", makeHandler(handleCommand))
 	http.Handle("/kill", makeHandler(handleKillAll))
 	http.Handle("/die", makeHandler(handleDie))
