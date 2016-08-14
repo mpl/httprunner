@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,8 +35,8 @@ var (
 	rootdir, _ = os.Getwd()
 	up         *basicauth.UserPass
 
-	childrenMu sync.Mutex
-	children   []*os.Process
+	childrenMu sync.RWMutex
+	children   map[time.Time]*os.Process
 
 	// TODO(mpl): rate limit per source ip instead of for all requests?
 	lastRunMu sync.RWMutex
@@ -137,6 +138,7 @@ func killChildren() {
 			log.Printf("couldn't kill child: %v", err)
 		}
 	}
+	children = make(map[time.Time]*os.Process)
 }
 
 func handleKillAll(w http.ResponseWriter, r *http.Request) {
@@ -157,9 +159,32 @@ func handleDie(w http.ResponseWriter, r *http.Request) {
 	os.Exit(0)
 }
 
-// TODO(mpl): handler to list all [pid, time started]
+type times []time.Time
 
-// TODO(mpl): do some request suppressing
+func (t times) Len() int           { return len(t) }
+func (t times) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
+func (t times) Less(i, j int) bool { return t[i].Before(t[j]) }
+
+func handleList(w http.ResponseWriter, r *http.Request) {
+	childrenMu.RLock()
+	defer childrenMu.RUnlock()
+	var t times
+	for k, _ := range children {
+		t = append(t, k)
+	}
+	sort.Sort(t)
+	var out bytes.Buffer
+	for _, pt := range t {
+		if _, err := out.WriteString(fmt.Sprintf("%s : %d\n", pt.Format(time.RFC3339), children[pt].Pid)); err != nil {
+			http.Error(w, "can't print children list", http.StatusInternalServerError)
+			return
+		}
+	}
+	if _, err := io.Copy(w, &out); err != nil {
+		log.Printf("error listing children: %v", err)
+	}
+}
+
 func handleCommand(w http.ResponseWriter, r *http.Request) {
 	if *flagRate != 0 {
 		lastRunMu.RLock()
@@ -186,8 +211,9 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("Started %v with pid %v", args[0], cmd.Process.Pid)
+	startTime := time.Now()
 	childrenMu.Lock()
-	children = append(children, cmd.Process)
+	children[startTime] = cmd.Process
 	childrenMu.Unlock()
 	lastRunMu.Lock()
 	lastRun = time.Now()
@@ -196,6 +222,9 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 		if err := cmd.Wait(); err != nil {
 			log.Printf("%v failed: %v, %v", args[0], err, berr.String())
 		}
+		childrenMu.Lock()
+		delete(children, startTime)
+		childrenMu.Unlock()
 	}()
 	var bufout bytes.Buffer
 	sendResponse := func(b *bytes.Buffer) {
@@ -259,10 +288,12 @@ func main() {
 	}
 
 	initUserPass()
+	children = make(map[time.Time]*os.Process)
 
 	http.Handle("/run", makeHandler(handleCommand))
 	http.Handle("/kill", makeHandler(handleKillAll))
 	http.Handle("/die", makeHandler(handleDie))
+	http.Handle("/ls", makeHandler(handleList))
 	if err := http.ListenAndServeTLS(
 		*flagHost,
 		filepath.Join(os.Getenv("HOME"), "keys", "cert.pem"),
