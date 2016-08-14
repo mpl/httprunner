@@ -27,6 +27,7 @@ var (
 	flagHelp     = flag.Bool("h", false, "show this help")
 	flagUserpass = flag.String("userpass", "", "optional username:password protection")
 	flagCommand  = flag.String("command", "", "The command to run")
+	flagRate     = flag.Duration("rate", time.Second, "To limit the number of processes created to no more than one per given duration. Set to 0 for no limit.")
 )
 
 var (
@@ -35,6 +36,10 @@ var (
 
 	childrenMu sync.Mutex
 	children   []*os.Process
+
+	// TODO(mpl): rate limit per source ip instead of for all requests?
+	lastRunMu sync.RWMutex
+	lastRun   time.Time
 )
 
 func usage() {
@@ -156,6 +161,15 @@ func handleDie(w http.ResponseWriter, r *http.Request) {
 
 // TODO(mpl): do some request suppressing
 func handleCommand(w http.ResponseWriter, r *http.Request) {
+	if *flagRate != 0 {
+		lastRunMu.RLock()
+		if time.Now().Before(lastRun.Add(*flagRate)) {
+			http.Error(w, "Command process creation is rate limited", http.StatusTooManyRequests)
+			lastRunMu.RUnlock()
+			return
+		}
+		lastRunMu.RUnlock()
+	}
 	// TODO(mpl): be less lazy about the doubled spaces, and probably other things.
 	args := strings.Fields(*flagCommand)
 	cmd := exec.Command(args[0], args[1:]...)
@@ -175,6 +189,9 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 	childrenMu.Lock()
 	children = append(children, cmd.Process)
 	childrenMu.Unlock()
+	lastRunMu.Lock()
+	lastRun = time.Now()
+	lastRunMu.Unlock()
 	go func() {
 		if err := cmd.Wait(); err != nil {
 			log.Printf("%v failed: %v, %v", args[0], err, berr.String())
