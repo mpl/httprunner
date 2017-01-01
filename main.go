@@ -46,7 +46,7 @@ var (
 func usage() {
 	fmt.Fprintf(os.Stderr, "\t httprunner \n")
 	flag.PrintDefaults()
-	fmt.Fprint(os.Stderr, "The endpoints are /run, /kill, and /die.\n")
+	fmt.Fprint(os.Stderr, "The endpoints are /run, /ls, /kill, and /die.\n")
 	os.Exit(2)
 }
 
@@ -86,6 +86,7 @@ func initUserPass() {
 }
 
 // TODO(mpl): have a look at https://github.com/cespare/window
+// Does not work for me as it is, since it's not a reader as well.
 
 type limitWriter struct {
 	deadline time.Time
