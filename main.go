@@ -2,25 +2,21 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/mpl/basicauth"
-	"golang.org/x/crypto/acme/autocert"
+	"github.com/mpl/simpletls"
 )
 
 const (
@@ -33,15 +29,11 @@ var (
 	flagUserpass = flag.String("userpass", "", "optional username:password protection")
 	flagCommand  = flag.String("command", "", "The command to run")
 	flagRate     = flag.Duration("rate", time.Second, "To limit the number of processes created to no more than one per given duration. Set to 0 for no limit.")
-	flagAutocert = flag.Bool("autocert", true, `Get https certificate from Let's Encrypt. Obviously -host must contain a full qualified domain name. The cached certificate(s) will be in $HOME/keys/letsencrypt.cache.`)
 )
 
 var (
 	rootdir, _ = os.Getwd()
 	up         *basicauth.UserPass
-	tlsKey     = filepath.Join(os.Getenv("HOME"), "keys", "key.pem")
-	tlsCert    = filepath.Join(os.Getenv("HOME"), "keys", "cert.pem")
-	certCache  = filepath.Join(os.Getenv("HOME"), "keys", "letsencrypt.cache")
 
 	childrenMu sync.RWMutex
 	children   map[time.Time]*os.Process
@@ -281,40 +273,6 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 	sendResponse(&bufout)
 }
 
-func setupTLS() (*tls.Config, error) {
-	hostname := *flagHost
-	if strings.Contains(hostname, ":") {
-		h, _, err := net.SplitHostPort(hostname)
-		if err != nil {
-			return nil, err
-		}
-		hostname = h
-	}
-	if *flagAutocert {
-		m := autocert.Manager{
-			Prompt:     autocert.AcceptTOS,
-			HostPolicy: autocert.HostWhitelist(hostname),
-			Cache:      autocert.DirCache(certCache),
-		}
-		return &tls.Config{
-			Rand:           rand.Reader,
-			Time:           time.Now,
-			NextProtos:     []string{"http/1.1"},
-			GetCertificate: m.GetCertificate,
-		}, nil
-	}
-	cert, err := tls.LoadX509KeyPair(tlsCert, tlsKey)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to load TLS cert: %v", err)
-	}
-	return &tls.Config{
-		Rand:         rand.Reader,
-		Time:         time.Now,
-		NextProtos:   []string{"http/1.1"},
-		Certificates: []tls.Certificate{cert},
-	}, nil
-}
-
 func main() {
 	flag.Usage = usage
 	flag.Parse()
@@ -333,15 +291,10 @@ func main() {
 	initUserPass()
 	children = make(map[time.Time]*os.Process)
 
-	listener, err := net.Listen("tcp", *flagHost)
+	listener, err := simpletls.Listen(*flagHost)
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", *flagHost, err)
 	}
-	config, err := setupTLS()
-	if err != nil {
-		log.Fatalf("could not configure TLS connection: %v", err)
-	}
-	listener = tls.NewListener(listener, config)
 
 	http.Handle("/run", makeHandler(handleCommand))
 	http.Handle("/kill", makeHandler(handleKillAll))
